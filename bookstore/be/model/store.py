@@ -1,52 +1,108 @@
 import logging
-import os
-import pymongo
+import mysql.connector
 import threading
-from pymongo import MongoClient
-from pymongo import MongoClient
-from pymongo.database import Database
+from mysql.connector import Error
+
 class Store:
     database: str
-    client: MongoClient
-    db: Database
+    conn: mysql.connector.connect
+    cursor: mysql.connector.cursor
 
-    def __init__(self, db_url="mongodb://localhost:27017/", db_name="bookstore"):
-        # 连接 MongoDB 数据库
-        self.client = MongoClient(db_url)
-        self.db = self.client[db_name]
-        self.init_collections()
-
-    def init_collections(self):
+    def __init__(self, db_url="localhost", db_user="root", db_password="", db_name="bookstore"):
+        # 连接 MySQL 数据库
         try:
-            # 初始化 MongoDB 集合
-            self.db.create_collection("user")
-            self.db.create_collection("user_store")
-            self.db.create_collection("store")
-            self.db.create_collection("new_order")
-            self.db.create_collection("new_order_detail")
-            
-            # 为一些重要的字段创建索引（类似于 SQL 中的主键）
-            self.db.user.create_index([("user_id", pymongo.ASCENDING)], unique=True)
-            self.db.user_store.create_index([("user_id", pymongo.ASCENDING), ("store_id", pymongo.ASCENDING)], unique=True)
-            self.db.store.create_index([("store_id", pymongo.ASCENDING), ("book_id", pymongo.ASCENDING)], unique=True)
-            self.db.new_order.create_index([("order_id", pymongo.ASCENDING)], unique=True)
-            self.db.new_order_detail.create_index([("order_id", pymongo.ASCENDING), ("book_id", pymongo.ASCENDING)], unique=True)
+            self.conn = mysql.connector.connect(
+                host=db_url,
+                user=db_user,
+                password=db_password,
+                database=db_name
+            )
+            self.cursor = self.conn.cursor(dictionary=True)
+            self.init_tables()
+        except Error as e:
+            logging.error(f"Error while connecting to MySQL: {e}")
+            raise
 
-        except pymongo.errors.CollectionInvalid as e:
-            logging.error(e)
+    def init_tables(self):
+        try:
+            # 初始化 MySQL 表
+            self.create_table("user", """
+                CREATE TABLE IF NOT EXISTS user (
+                    user_id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(255) NOT NULL,
+                    password VARCHAR(255) NOT NULL
+                )
+            """)
 
+            self.create_table("user_store", """
+                CREATE TABLE IF NOT EXISTS user_store (
+                    user_id INT NOT NULL,
+                    store_id INT NOT NULL,
+                    PRIMARY KEY (user_id, store_id),
+                    FOREIGN KEY (user_id) REFERENCES user(user_id),
+                    FOREIGN KEY (store_id) REFERENCES store(store_id)
+                )
+            """)
+
+            self.create_table("store", """
+                CREATE TABLE IF NOT EXISTS store (
+                    store_id INT AUTO_INCREMENT PRIMARY KEY,
+                    book_id INT NOT NULL,
+                    book_name VARCHAR(255) NOT NULL
+                )
+            """)
+
+            self.create_table("new_order", """
+                CREATE TABLE IF NOT EXISTS new_order (
+                    order_id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    is_paid BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_shipped BOOLEAN NOT NULL DEFAULT FALSE,
+                    FOREIGN KEY (user_id) REFERENCES user(user_id)
+                )
+            """)
+
+            self.create_table("new_order_detail", """
+                CREATE TABLE IF NOT EXISTS new_order_detail (
+                    order_id INT NOT NULL,
+                    book_id INT NOT NULL,
+                    quantity INT NOT NULL,
+                    PRIMARY KEY (order_id, book_id),
+                    FOREIGN KEY (order_id) REFERENCES new_order(order_id),
+                    FOREIGN KEY (book_id) REFERENCES store(book_id)
+                )
+            """)
+
+        except Error as e:
+            logging.error(f"Error while initializing tables: {e}")
+            raise
+
+    def create_table(self, table_name, create_sql):
+        try:
+            self.cursor.execute(create_sql)
+            self.conn.commit()
+            logging.info(f"Table '{table_name}' is ready.")
+        except Error as e:
+            logging.error(f"Error creating table {table_name}: {e}")
+    
     def get_db_conn(self):
-        # 返回 MongoDB 数据库实例
-        return self.db
+        # 返回 MySQL 数据库连接实例
+        return self.conn
+
+    def close(self):
+        # 关闭数据库连接
+        if self.conn.is_connected():
+            self.cursor.close()
+            self.conn.close()
 
 # 全局数据库实例
 database_instance: Store = None
 # 数据库初始化同步的全局变量
 init_completed_event = threading.Event()
 
-def init_database(db_url, db_name):
+def init_database(db_url, db_user, db_password, db_name):
     global database_instance
-    database_instance = Store(db_url, db_name)
+    database_instance = Store(db_url, db_user, db_password, db_name)
     init_completed_event.set()
 
 def get_db_conn():
