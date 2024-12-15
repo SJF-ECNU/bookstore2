@@ -2,8 +2,8 @@ import os
 import random
 import base64
 import simplejson as json
-from pymongo import MongoClient
-from bson.binary import Binary
+import mysql.connector
+from mysql.connector import Error
 
 class Book:
     id: str
@@ -31,20 +31,35 @@ class Book:
 
 class BookDB:
     def __init__(self, large: bool = False):
-        self.client = MongoClient('mongodb://localhost:27017/')  # 连接到MongoDB
-        self.db = self.client['bookstore']  # 数据库名称
-        self.collection = self.db['books']  # 集合名称
+        try:
+            self.conn = mysql.connector.connect(
+                host="localhost",
+                user="root",
+                password="040708",
+                database="bookstore"
+            )
+            if self.conn.is_connected():
+                self.cursor = self.conn.cursor(dictionary=True)
+        except Error as e:
+            print(f"Error while connecting to MySQL: {e}")
 
     def get_book_count(self):
-        return self.collection.count_documents({})
+        query = "SELECT COUNT(*) as count FROM books"
+        self.cursor.execute(query)
+        result = self.cursor.fetchone()
+        return result["count"] if result else 0
+
+    import json
 
     def get_book_info(self, start, size) -> list[Book]:
         books = []
-        cursor = self.collection.find().skip(start).limit(size)
+        query = "SELECT * FROM books LIMIT %s OFFSET %s"
+        self.cursor.execute(query, (size, start))
+        rows = self.cursor.fetchall()
 
-        for row in cursor:
+        for row in rows:
             book = Book()
-            book.id = str(row.get('_id'))  # MongoDB的_id字段
+            book.id = str(row.get('id'))  # MySQL的自增ID字段
             book.title = row.get('title')
             book.author = row.get('author')
             book.publisher = row.get('publisher')
@@ -59,13 +74,21 @@ class BookDB:
             book.author_intro = row.get('author_intro')
             book.book_intro = row.get('book_intro')
             book.content = row.get('content')
-            book.tags = row.get('tags', [])
+            
+            # 处理 tags 字段
+            tags = row.get('tags', "")
+            try:
+                # 尝试解析 JSON
+                book.tags = json.loads(tags)
+            except json.JSONDecodeError:
+                # 如果解析失败，将 tags 拆分为列表
+                book.tags = [tag.strip() for tag in tags.split("\n") if tag.strip()]
             
             # 处理二进制图片数据
             picture_binary = row.get('picture')
-            picture_base64 = base64.b64encode(picture_binary).decode('utf-8')
-            book.pictures.append(picture_base64)
+            if picture_binary:
+                picture_base64 = base64.b64encode(picture_binary).decode('utf-8')
+                book.pictures.append(picture_base64)
 
             books.append(book)
         return books
-

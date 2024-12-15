@@ -1,14 +1,24 @@
 import jwt
 import time
 import logging
-from pymongo import MongoClient
+import mysql.connector
+from mysql.connector import Error
 from be.model import error
 
-# MongoDB 连接设置
+# MySQL 连接设置
 class DBConn:
-    def __init__(self, uri="mongodb://localhost:27017", db_name="bookstore"):
-        self.client = MongoClient(uri)
-        self.db = self.client[db_name]
+    def __init__(self, host="localhost", user="root", password="040708", db_name="bookstore"):
+        try:
+            self.conn = mysql.connector.connect(
+                host=host,
+                user=user,
+                password=password,
+                database=db_name
+            )
+            if self.conn.is_connected():
+                self.cursor = self.conn.cursor(dictionary=True)
+        except Error as e:
+            logging.error(f"Error while connecting to MySQL: {e}")
 
 # encode a json string like:
 #   {
@@ -30,7 +40,7 @@ def jwt_encode(user_id: str, terminal: str) -> str:
 #       "terminal": [terminal code],
 #       "timestamp": [ts]} to a JWT
 #   }
-def jwt_decode(encoded_token, user_id: str) -> str:
+def jwt_decode(encoded_token, user_id: str) -> dict:
     decoded = jwt.decode(encoded_token, key=user_id, algorithms=["HS256"])
     return decoded
 
@@ -50,14 +60,16 @@ class User(DBConn):
                 now = time.time()
                 if self.token_lifetime > now - ts >= 0:
                     return True
-        except jwt.exceptions.InvalidSignatureError as e:# pragma: no cover
+        except jwt.exceptions.InvalidSignatureError as e:
             logging.error(str(e))
             return False
 
     def register(self, user_id: str, password: str):
         try:
             # 检查是否已经存在相同的 user_id
-            existing_user = self.db.user.find_one({"user_id": user_id})
+            query = "SELECT * FROM user WHERE user_id = %s"
+            self.cursor.execute(query, (user_id,))
+            existing_user = self.cursor.fetchone()
             if existing_user:
                 return error.error_exist_user_id(user_id)
 
@@ -70,16 +82,21 @@ class User(DBConn):
                 "token": token,
                 "terminal": terminal
             }
-            result = self.db.user.insert_one(user_doc)
-            if not result.acknowledged:
-                return error.error_exist_user_id(user_id)
-        except Exception as e:# pragma: no cover
+            insert_query = """
+            INSERT INTO user (user_id, password, balance, token, terminal)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+            self.cursor.execute(insert_query, (user_id, password, 0, token, terminal))
+            self.conn.commit()
+        except Exception as e:
             logging.error(f"Error during registration: {str(e)}")
             return error.error_exist_user_id(user_id)
         return 200, "ok"
 
     def check_token(self, user_id: str, token: str) -> (int, str):
-        user_doc = self.db.user.find_one({"user_id": user_id})
+        query = "SELECT * FROM user WHERE user_id = %s"
+        self.cursor.execute(query, (user_id,))
+        user_doc = self.cursor.fetchone()
         if user_doc is None:
             return error.error_authorization_fail()
         db_token = user_doc.get("token")
@@ -88,7 +105,9 @@ class User(DBConn):
         return 200, "ok"
 
     def check_password(self, user_id: str, password: str) -> (int, str):
-        user_doc = self.db.user.find_one({"user_id": user_id})
+        query = "SELECT * FROM user WHERE user_id = %s"
+        self.cursor.execute(query, (user_id,))
+        user_doc = self.cursor.fetchone()
         if user_doc is None:
             return error.error_authorization_fail()
         
@@ -105,17 +124,20 @@ class User(DBConn):
                 return code, message, ""
 
             token = jwt_encode(user_id, terminal)
-            result = self.db.user.update_one(
-                {"user_id": user_id},
-                {"$set": {"token": token, "terminal": terminal}}
-            )
-            if result.modified_count == 0:
+            update_query = """
+            UPDATE user
+            SET token = %s, terminal = %s
+            WHERE user_id = %s
+            """
+            self.cursor.execute(update_query, (token, terminal, user_id))
+            self.conn.commit()
+            if self.cursor.rowcount == 0:
                 return error.error_authorization_fail() + ("",)
-        except Exception as e:# pragma: no cover
+        except Exception as e:
             return 528, "{}".format(str(e)), ""
         return 200, "ok", token
 
-    def logout(self, user_id: str, token: str) -> bool:
+    def logout(self, user_id: str, token: str) -> (int, str):
         try:
             code, message = self.check_token(user_id, token)
             if code != 200:
@@ -124,13 +146,16 @@ class User(DBConn):
             terminal = "terminal_{}".format(str(time.time()))
             dummy_token = jwt_encode(user_id, terminal)
 
-            result = self.db.user.update_one(
-                {"user_id": user_id},
-                {"$set": {"token": dummy_token, "terminal": terminal}}
-            )
-            if result.modified_count == 0:
+            update_query = """
+            UPDATE user
+            SET token = %s, terminal = %s
+            WHERE user_id = %s
+            """
+            self.cursor.execute(update_query, (dummy_token, terminal, user_id))
+            self.conn.commit()
+            if self.cursor.rowcount == 0:
                 return error.error_authorization_fail()
-        except Exception as e:# pragma: no cover
+        except Exception as e:
             return 528, "{}".format(str(e))
         return 200, "ok"
 
@@ -140,16 +165,18 @@ class User(DBConn):
             if code != 200:
                 return code, message
 
-            result = self.db.user.delete_one({"user_id": user_id})
-            if result.deleted_count == 0:
+            delete_query = "DELETE FROM user WHERE user_id = %s"
+            self.cursor.execute(delete_query, (user_id,))
+            self.conn.commit()
+            if self.cursor.rowcount == 0:
                 return error.error_authorization_fail()
-        except Exception as e:# pragma: no cover
+        except Exception as e:
             return 528, "{}".format(str(e))
         return 200, "ok"
 
     def change_password(
         self, user_id: str, old_password: str, new_password: str
-    ) -> bool:
+    ) -> (int, str):
         try:
             code, message = self.check_password(user_id, old_password)
             if code != 200:
@@ -157,12 +184,16 @@ class User(DBConn):
 
             terminal = "terminal_{}".format(str(time.time()))
             token = jwt_encode(user_id, terminal)
-            result = self.db.user.update_one(
-                {"user_id": user_id},
-                {"$set": {"password": new_password, "token": token, "terminal": terminal}}
-            )
-            if result.modified_count == 0:
+            update_query = """
+            UPDATE user
+            SET password = %s, token = %s, terminal = %s
+            WHERE user_id = %s
+            """
+            self.cursor.execute(update_query, (new_password, token, terminal, user_id))
+            self.conn.commit()
+            if self.cursor.rowcount == 0:
                 return error.error_authorization_fail()
-        except Exception as e:# pragma: no cover
+        except Exception as e:
             return 528, "{}".format(str(e))
         return 200, "ok"
+    

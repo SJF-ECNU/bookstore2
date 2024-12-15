@@ -2,7 +2,7 @@ import time
 import pytest
 from fe.access import auth
 from fe import conf
-from be.model.store import Store  # 假设 Store 中管理 MongoDB 连接
+from be.model.store import Store  # 假设 Store 中管理 MySQL 连接
 
 class TestRegister:
     @pytest.fixture(autouse=True)
@@ -14,7 +14,9 @@ class TestRegister:
         
         # 清空数据库中的用户数据
         store = Store()
-        store.db['user'].delete_many({})  # 假设用户信息存储在 'user' 集合中
+        cursor = store.conn.cursor()  # 获取 MySQL 游标
+        cursor.execute("DELETE FROM user")  # 清空 user 表
+        store.conn.commit()  # 提交事务
         
         yield
 
